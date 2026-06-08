@@ -16,20 +16,18 @@ serde_json = "1.0"
 safetensors = "0.7"
 memmap2 = "0.9"
 
-# Optional CUDA dependencies - these are for the real implementation
-# When cuda-oxide is properly integrated, these will be actual dependencies
-# cuda-core = { path = "/path/to/cuda-oxide/crates/cuda-core", optional = true }
-# cuda-device = { path = "/path/to/cuda-oxide/crates/cuda-device", optional = true }
-# cuda-host = { path = "/path/to/cuda-oxide/crates/cuda-host", optional = true }
+# Real CUDA support via cudarc (actively maintained)
+cudarc = { version = "0.12", features = ["cuda-12050", "driver", "cublas", "cublaslt"], optional = true }
 
-# For now, these are stub dependencies
-cuda-core = { version = "0.1", optional = true }
-cuda-host = { version = "0.1", optional = true }
+# Additional CUDA ecosystem
+cust = { version = "0.3", optional = true }
+cuda-config = { version = "0.1", optional = true }
 
 [features]
 default = []
-cuda = ["cuda-core", "cuda-host"]
+cuda = ["cudarc"]
 gpu = ["cuda"]
+cublas = ["cuda"]
 async-ops = ["cuda"]
 
 [dev-dependencies]

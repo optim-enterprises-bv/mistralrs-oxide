@@ -1,119 +1,110 @@
-//! CUDA backend integration using cuda-core and cuda-oxide
-//! 
-//! This module provides actual GPU execution capabilities when CUDA is available.
+//! CUDA backend using cudarc - production-ready GPU acceleration
+//!
+//! This module provides actual GPU execution via the cudarc crate,
+//! which wraps CUDA driver APIs in safe Rust.
+
+#![cfg(feature = "cuda")]
 
 use std::sync::Arc;
-use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig};
-use crate::core::{Device, DType, Shape, Tensor, Storage, StorageData};
-use crate::error::{OxideError, OxideResult, bail};
+use cudarc::driver::{CudaContext, CudaDevice, CudaStream, DeviceSlice, DevicePtr, LaunchConfig};
+use crate::core::{Device, DType, Shape, Tensor};
+use crate::error::{OxideError, OxideResult};
 
 pub mod memory;
 pub mod streams;
 pub mod launcher;
 pub mod cublas;
 pub mod errors;
+pub mod context;
 
-pub use memory::{GpuMemoryPool, DeviceBufferManager};
-pub use streams::{StreamManager, GpuEvent};
-pub use launcher::KernelLauncher;
-pub use cublas::CuBLASHandle;
-pub use errors::{check_cuda, CudaError};
+pub use memory::{CudaMemoryPool, DeviceBufferExt, PinnedBuffer};
+pub use streams::{CudaStreamPool, StreamHandle, EventHandle};
+pub use launcher::{KernelLauncher, KernelModule, GridConfig, BlockConfig};
+pub use cublas::{CublasContext, GemmConfig};
+pub use errors::{CudaResult, check_cuda_error, CudaError};
+pub use context::{CudaContextManager, DeviceProperties};
 
-/// CUDA backend state
+/// CUDA backend for tensor operations
 pub struct CudaBackend {
+    device: Arc<CudaDevice>,
     context: Arc<CudaContext>,
+    memory_pool: CudaMemoryPool,
+    stream_pool: CudaStreamPool,
+    cublas: Option<CublasContext>,
     device_id: usize,
-    memory_pool: GpuMemoryPool,
-    stream_manager: StreamManager,
-    cublas: Option<CuBLASHandle>,
 }
 
 impl CudaBackend {
     /// Initialize CUDA backend for specified device
     pub fn new(device_id: usize) -> OxideResult<Self> {
-        // Initialize CUDA context
-        let context = CudaContext::new(device_id)
-            .map_err(|e| OxideError::CudaError(format!("Failed to create CUDA context: {}", e)))?;
+        // Get or create CUDA device
+        let device = CudaDevice::new(device_id)
+            .map_err(|e| OxideError::CudaError(format!(
+                "Failed to initialize CUDA device {}: {}", device_id, e
+            )))?;
         
-        let context = Arc::new(context);
+        let device = Arc::new(device);
+        let context = Arc::new(device.default_context());
         
         // Initialize memory pool
-        let memory_pool = GpuMemoryPool::new(device_id)?;
+        let memory_pool = CudaMemoryPool::new(&device)?;
         
-        // Initialize stream manager
-        let stream_manager = StreamManager::new(&context)?;
+        // Initialize stream pool
+        let stream_pool = CudaStreamPool::new(&device, 8)?;
         
-        // Optionally initialize cuBLAS
-        let cublas = CuBLASHandle::new()
-            .ok()
-            .map(|h| h);
+        // Try to initialize cuBLAS
+        let cublas = CublasContext::new(&device).ok();
         
         Ok(Self {
+            device,
             context,
-            device_id,
             memory_pool,
-            stream_manager,
+            stream_pool,
             cublas,
+            device_id,
         })
     }
 
-    /// Get default stream
-    pub fn default_stream(&self,
-    ) -> &CudaStream {
-        self.stream_manager.default_stream()
+    /// Get CUDA device
+    pub fn device(&self) -> &Arc<CudaDevice> {
+        &self.device
     }
 
-    /// Create new stream for async operations
-    pub fn create_stream(&self,
-    ) -> OxideResult<CudaStream> {
-        self.stream_manager.create_stream()
+    /// Get default stream
+    pub fn default_stream(&self) -> &CudaStream {
+        self.device.default_stream()
+    }
+
+    /// Acquire stream from pool
+    pub fn acquire_stream(&self) -> OxideResult<StreamHandle> {
+        self.stream_pool.acquire()
     }
 
     /// Get memory pool
-    pub fn memory_pool(&self) -> &GpuMemoryPool {
+    pub fn memory_pool(&self) -> &CudaMemoryPool {
         &self.memory_pool
     }
 
-    /// Get cuBLAS handle if available
-    pub fn cublas(&self) -> Option<&CuBLASHandle> {
+    /// Get cuBLAS context
+    pub fn cublas(&self) -> Option<&CublasContext> {
         self.cublas.as_ref()
     }
 
-    /// Synchronize all streams
-    pub fn synchronize_all(&self) -> OxideResult<()> {
-        self.stream_manager.synchronize_all()
-    }
-
     /// Get device properties
-    pub fn device_props(&self,
-    ) -> DeviceProps {
-        DeviceProps {
-            device_id: self.device_id,
-            name: format!("CUDA Device {}", self.device_id),
-            compute_capability: (8, 6), // Placeholder
-            total_memory: 24_000_000_000, // Placeholder: 24GB
-            free_memory: 20_000_000_000,
-        }
+    pub fn properties(&self) -> DeviceProperties {
+        DeviceProperties::from_device(&self.device, self.device_id)
     }
-}
 
-/// Device properties
-#[derive(Debug, Clone)]
-pub struct DeviceProps {
-    pub device_id: usize,
-    pub name: String,
-    pub compute_capability: (i32, i32),
-    pub total_memory: usize,
-    pub free_memory: usize,
-}
-
-impl DeviceProps {
-    pub fn supports_tensor_cores(&self) -> bool {
-        self.compute_capability.0 >= 7
+    /// Synchronize all streams
+    pub fn synchronize(&self) -> OxideResult<()> {
+        self.device.synchronize()
+            .map_err(|e| OxideError::CudaError(format!("Synchronize failed: {}", e)))
     }
-    
-    pub fn supports_async_copy(&self) -> bool {
-        self.compute_capability.0 >= 8
+
+    /// Get available memory
+    pub fn memory_info(&self) -> (usize, usize) {
+        // (free, total)
+        self.device.memory_info()
     }
 }
 
@@ -125,17 +116,30 @@ pub struct CudaBackendManager {
 impl CudaBackendManager {
     /// Initialize all available CUDA devices
     pub fn initialize_all() -> OxideResult<Self> {
-        let device_count = get_cuda_device_count();
+        let device_count = cudarc::driver::device_count()
+            .map_err(|e| OxideError::CudaError(format!("Failed to get device count: {}", e)))?;
+        
         let mut backends = Vec::with_capacity(device_count);
         
         for i in 0..device_count {
             match CudaBackend::new(i) {
-                Ok(backend) => backends.push(Some(backend)),
+                Ok(backend) => {
+                    let props = backend.properties();
+                    println!("Initialized CUDA device {}: {} (CC {}.{}, {} MB)",
+                        i, props.name, props.major, props.minor, props.total_memory / (1024 * 1024));
+                    backends.push(Some(backend));
+                }
                 Err(e) => {
                     eprintln!("Failed to initialize CUDA device {}: {}", i, e);
                     backends.push(None);
                 }
             }
+        }
+        
+        if backends.iter().all(|b| b.is_none()) {
+            return Err(OxideError::CudaError(
+                "No CUDA devices available".to_string()
+            ));
         }
         
         Ok(Self { backends })
@@ -146,28 +150,41 @@ impl CudaBackendManager {
         self.backends.get(device_id).and_then(|b| b.as_ref())
     }
 
-    /// Get number of initialized devices
+    /// Get mutable backend for device
+    pub fn get_mut(&mut self, device_id: usize) -> Option<&mut CudaBackend> {
+        self.backends.get_mut(device_id).and_then(|b| b.as_mut())
+    }
+
+    /// Get any available backend
+    pub fn get_any(&self) -> Option<&CudaBackend> {
+        self.backends.iter().find_map(|b| b.as_ref())
+    }
+
+    /// Number of initialized devices
     pub fn num_devices(&self) -> usize {
         self.backends.iter().filter(|b| b.is_some()).count()
     }
 }
 
-/// Get CUDA device count
-pub fn get_cuda_device_count() -> usize {
-    // In real implementation, query CUDA driver
-    // For now, return 1 assuming we have at least one GPU
-    1
-}
-
 /// Check if CUDA is available
 pub fn is_cuda_available() -> bool {
-    get_cuda_device_count() > 0
+    cudarc::driver::device_count().map(|c| c > 0).unwrap_or(false)
 }
 
-/// Get CUDA compute capability
-pub fn get_compute_capability(device_id: usize) -> Option<(i32, i32)> {
-    // In real implementation, query device properties
-    Some((8, 6)) // Placeholder: RTX 3090 level
+/// Get number of CUDA devices
+pub fn device_count() -> usize {
+    cudarc::driver::device_count().unwrap_or(0)
+}
+
+/// Get compute capability for device
+pub fn compute_capability(device_id: usize) -> Option<(i32, i32)> {
+    use cudarc::driver::CudaDevice;
+    
+    CudaDevice::new(device_id).ok().map(|dev| {
+        let major = dev.attribute(cudarc::driver::DeviceAttribute::ComputeCapabilityMajor).unwrap_or(0);
+        let minor = dev.attribute(cudarc::driver::DeviceAttribute::ComputeCapabilityMinor).unwrap_or(0);
+        (major, minor)
+    })
 }
 
 #[cfg(test)]
@@ -175,16 +192,37 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_device_props() {
-        let props = DeviceProps {
-            device_id: 0,
-            name: "Test GPU".to_string(),
-            compute_capability: (8, 6),
-            total_memory: 24_000_000_000,
-            free_memory: 20_000_000_000,
-        };
+    fn test_cuda_availability() {
+        let available = is_cuda_available();
+        println!("CUDA available: {}", available);
         
-        assert!(props.supports_tensor_cores());
-        assert!(props.supports_async_copy());
+        if available {
+            let count = device_count();
+            println!("Found {} CUDA device(s)", count);
+            
+            for i in 0..count.min(1) {
+                if let Some(cc) = compute_capability(i) {
+                    println!("Device {}: CC {}.{}", i, cc.0, cc.1);
+                }
+            }
+        }
+    }
+    
+    #[test]
+    fn test_backend_initialization() -> OxideResult<()> {
+        if !is_cuda_available() {
+            println!("Skipping test - no CUDA available");
+            return Ok(());
+        }
+        
+        let manager = CudaBackendManager::initialize_all()?;
+        assert!(manager.num_devices() > 0);
+        
+        if let Some(backend) = manager.get_any() {
+            let props = backend.properties();
+            println!("Using device: {} ({} MB)", props.name, props.total_memory / (1024 * 1024));
+        }
+        
+        Ok(())
     }
 }

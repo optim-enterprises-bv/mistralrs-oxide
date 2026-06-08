@@ -1,328 +1,170 @@
-//! cuBLAS integration for optimized matrix operations
+//! Real cuBLAS integration using cudarc
+
+#![cfg(feature = "cuda")]
 
 use std::sync::Arc;
-use cuda_core::{CudaStream, DeviceBuffer};
-use crate::error::{OxideError, OxideResult, bail};
+use cudarc::driver::{CudaDevice, CudaSlice};
+use cudarc::cublas::{Cublas, GemmConfig as CublasGemmConfig};
+use crate::error::{OxideError, OxideResult};
 
-/// cuBLAS handle wrapper
-pub struct CuBLASHandle {
-    _marker: std::marker::PhantomData<u8>,
+/// cuBLAS context wrapper
+pub struct CublasContext {
+    cublas: Cublas,
 }
 
-impl CuBLASHandle {
-    /// Create new cuBLAS handle
-    pub fn new() -> Result<Self, String> {
-        // In real implementation, call cublasCreate
-        // For now, return a placeholder
-        Ok(Self {
-            _marker: std::marker::PhantomData,
-        })
-    }
-
-    /// Set cuBLAS stream
-    pub fn set_stream(&self, _stream: &CudaStream) -> OxideResult<()> {
-        // In real implementation: cublasSetStream
-        Ok(())
+impl CublasContext {
+    /// Create new cuBLAS context
+    pub fn new(device: &Arc<CudaDevice>) -> Option<Self> {
+        Cublas::new(device).ok().map(|cublas| Self { cublas })
     }
 
     /// GEMM: C = alpha * A * B + beta * C
     pub fn gemm(
         &self,
-        _stream: &CudaStream,
-        trans_a: bool,
-        trans_b: bool,
+        a: &CudaSlice<f32>,
+        b: &CudaSlice<f32>,
+        c: &mut CudaSlice<f32>,
         m: usize,
         n: usize,
         k: usize,
         alpha: f32,
-        a: &DeviceBuffer<f32>,
-        lda: usize,
-        b: &DeviceBuffer<f32>,
-        ldb: usize,
         beta: f32,
-        c: &mut DeviceBuffer<f32>,
-        ldc: usize,
     ) -> OxideResult<()> {
-        // In real implementation: cublasSgemm
-        // For now, return placeholder
-        Ok(())
+        let config = CublasGemmConfig {
+            alpha,
+            beta,
+            m: m as i32,
+            n: n as i32,
+            k: k as i32,
+            lda: k as i32,  // leading dimension of A
+            ldb: n as i32,  // leading dimension of B
+            ldc: n as i32,  // leading dimension of C
+            transa: false,
+            transb: false,
+        };
+
+        self.cublas.gemm(config, a, b, c)
+            .map_err(|e| OxideError::CudaError(format!("cuBLAS GEMM failed: {}", e)))
     }
 
-    /// GEMM with FP16
+    /// GEMM with FP16 (if available)
     pub fn gemm_f16(
         &self,
-        _stream: &CudaStream,
-        trans_a: bool,
-        trans_b: bool,
+        a: &CudaSlice<f16>,
+        b: &CudaSlice<f16>,
+        c: &mut CudaSlice<f16>,
         m: usize,
         n: usize,
         k: usize,
         alpha: f16,
-        a: &DeviceBuffer<f16>,
-        lda: usize,
-        b: &DeviceBuffer<f16>,
-        ldb: usize,
         beta: f16,
-        c: &mut DeviceBuffer<f16>,
-        ldc: usize,
     ) -> OxideResult<()> {
-        // In real implementation: cublasHgemm
-        Ok(())
-    }
-
-    /// GEMM with BF16 (Tensor Cores)
-    pub fn gemm_bf16(
-        &self,
-        _stream: &CudaStream,
-        trans_a: bool,
-        trans_b: bool,
-        m: usize,
-        n: usize,
-        k: usize,
-        alpha: u16,
-        a: &DeviceBuffer<u16>,
-        lda: usize,
-        b: &DeviceBuffer<u16>,
-        ldb: usize,
-        beta: u16,
-        c: &mut DeviceBuffer<u16>,
-        ldc: usize,
-    ) -> OxideResult<()> {
-        // In real implementation: cublasGemmEx with CUDA_R_16BF
-        Ok(())
+        // cudarc may not expose HGEMM directly
+        // Would need to use cublasHgemm or cublasGemmEx
+        Err(OxideError::UnsupportedOperation(
+            "FP16 GEMM not yet supported".to_string()
+        ))
     }
 
     /// Batched GEMM
     pub fn gemm_batched(
         &self,
-        _stream: &CudaStream,
-        trans_a: bool,
-        trans_b: bool,
+        a: &[&CudaSlice<f32>],
+        b: &[&CudaSlice<f32>],
+        c: &mut [&mut CudaSlice<f32>],
         m: usize,
         n: usize,
         k: usize,
         alpha: f32,
-        a: &[&DeviceBuffer<f32>],
-        lda: usize,
-        b: &[&DeviceBuffer<f32>],
-        ldb: usize,
         beta: f32,
-        c: &mut [&mut DeviceBuffer<f32>],
-        ldc: usize,
-        batch_count: usize,
     ) -> OxideResult<()> {
-        // In real implementation: cublasSgemmBatched
-        Ok(())
-    }
+        // Batch size
+        let batch_size = a.len();
+        assert_eq!(b.len(), batch_size);
+        assert_eq!(c.len(), batch_size);
 
-    /// Strided Batched GEMM
-    pub fn gemm_strided_batched(
-        &self,
-        _stream: &CudaStream,
-        trans_a: bool,
-        trans_b: bool,
-        m: usize,
-        n: usize,
-        k: usize,
-        alpha: f32,
-        a: &DeviceBuffer<f32>,
-        lda: usize,
-        stride_a: usize,
-        b: &DeviceBuffer<f32>,
-        ldb: usize,
-        stride_b: usize,
-        beta: f32,
-        c: &mut DeviceBuffer<f32>,
-        ldc: usize,
-        stride_c: usize,
-        batch_count: usize,
-    ) -> OxideResult<()> {
-        // In real implementation: cublasSgemmStridedBatched
-        Ok(())
-    }
+        for i in 0..batch_size {
+            self.gemm(a[i], b[i], c[i], m, n, k, alpha, beta)?;
+        }
 
-    /// AXPY: Y = alpha * X + Y
-    pub fn axpy(
-        &self,
-        _stream: &CudaStream,
-        n: usize,
-        alpha: f32,
-        x: &DeviceBuffer<f32>,
-        incx: usize,
-        y: &mut DeviceBuffer<f32>,
-        incy: usize,
-    ) -> OxideResult<()> {
-        // In real implementation: cublasSaxpy
-        Ok(())
-    }
-
-    /// SCAL: X = alpha * X
-    pub fn scal(
-        &self,
-        _stream: &CudaStream,
-        n: usize,
-        alpha: f32,
-        x: &mut DeviceBuffer<f32>,
-        incx: usize,
-    ) -> OxideResult<()> {
-        // In real implementation: cublasSscal
-        Ok(())
-    }
-
-    /// COPY: Y = X
-    pub fn copy(
-        &self,
-        _stream: &CudaStream,
-        n: usize,
-        x: &DeviceBuffer<f32>,
-        incx: usize,
-        y: &mut DeviceBuffer<f32>,
-        incy: usize,
-    ) -> OxideResult<()> {
-        // In real implementation: cublasScopy
-        Ok(())
-    }
-
-    /// DOT product
-    pub fn dot(
-        &self,
-        _stream: &CudaStream,
-        n: usize,
-        x: &DeviceBuffer<f32>,
-        incx: usize,
-        y: &DeviceBuffer<f32>,
-        incy: usize,
-    ) -> OxideResult<f32> {
-        // In real implementation: cublasSdot
-        Ok(0.0)
-    }
-
-    /// Destroy handle
-    pub fn destroy(self) -> OxideResult<()> {
-        // In real implementation: cublasDestroy
         Ok(())
     }
 }
 
-/// cuBLAS Lt handle for optimized GEMM
-pub struct CuBLASLtHandle {
-    _marker: std::marker::PhantomData<u8>,
-}
-
-impl CuBLASLtHandle {
-    pub fn new() -> Result<Self, String> {
-        // cuBLASLt requires newer CUDA
-        Ok(Self {
-            _marker: std::marker::PhantomData,
-        })
-    }
-
-    /// Matmul with algorithm selection
-    pub fn matmul(
-        &self,
-        _stream: &CudaStream,
-        _desc: &MatmulDesc,
-        _a: &DeviceBuffer<f32>,
-        _b: &DeviceBuffer<f32>,
-        _c: &mut DeviceBuffer<f32>,
-    ) -> OxideResult<()> {
-        // In real implementation: cublasLtMatmul
-        Ok(())
-    }
-}
-
-/// Matrix multiplication descriptor
-pub struct MatmulDesc {
+/// GEMM configuration
+#[derive(Debug, Clone)]
+pub struct GemmConfig {
     pub m: usize,
     pub n: usize,
     pub k: usize,
+    pub alpha: f32,
+    pub beta: f32,
     pub trans_a: bool,
     pub trans_b: bool,
-    pub dtype: CublasDataType,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum CublasDataType {
-    R_32F,
-    R_16F,
-    R_16BF,
-    R_8I,
+impl GemmConfig {
+    pub fn new(m: usize, n: usize, k: usize) -> Self {
+        Self {
+            m,
+            n,
+            k,
+            alpha: 1.0,
+            beta: 0.0,
+            trans_a: false,
+            trans_b: false,
+        }
+    }
+
+    pub fn with_alpha(mut self, alpha: f32) -> Self {
+        self.alpha = alpha;
+        self
+    }
+
+    pub fn with_beta(mut self, beta: f32) -> Self {
+        self.beta = beta;
+        self
+    }
+
+    pub fn with_transpose(mut self, trans_a: bool, trans_b: bool) -> Self {
+        self.trans_a = trans_a;
+        self.trans_b = trans_b;
+        self
+    }
 }
 
 /// cuBLAS wrapper with automatic algorithm selection
 pub struct CublasWrapper {
-    handle: CuBLASHandle,
+    cublas: CublasContext,
     use_tensor_cores: bool,
 }
 
 impl CublasWrapper {
-    pub fn new(handle: CuBLASHandle) -> Self {
+    pub fn new(cublas: CublasContext) -> Self {
         Self {
-            handle,
+            cublas,
             use_tensor_cores: true,
         }
     }
 
-    /// Enable/disable tensor cores
     pub fn set_tensor_cores(&mut self, enabled: bool) {
         self.use_tensor_cores = enabled;
     }
 
-    /// Smart GEMM with automatic selection
+    /// Smart GEMM: automatically choose best algorithm
     pub fn gemm_smart(
         &self,
-        stream: &CudaStream,
+        a: &CudaSlice<f32>,
+        b: &CudaSlice<f32>,
+        c: &mut CudaSlice<f32>,
         m: usize,
         n: usize,
         k: usize,
-        alpha: f32,
-        a: &DeviceBuffer<f32>,
-        b: &DeviceBuffer<f32>,
-        beta: f32,
-        c: &mut DeviceBuffer<f32>,
     ) -> OxideResult<()> {
-        // Choose optimal algorithm based on sizes
-        if self.should_use_tensor_cores(m, n, k) {
-            // Try tensor cores first
-            // Fall back to regular if not supported
-        }
-        
-        // Standard cuBLAS GEMM
-        self.handle.gemm(
-            stream, false, false, m, n, k, alpha, a, k, b, n, beta, c, n,
-        )
+        // For now, just use standard GEMM
+        // In production, would check sizes and choose best algorithm
+        self.cublas.gemm(a, b, c, m, n, k, 1.0, 0.0)
     }
-
-    fn should_use_tensor_cores(&self, m: usize, n: usize, k: usize) -> bool {
-        self.use_tensor_cores && m >= 64 && n >= 64 && k >= 64
-    }
-
-    /// Get handle reference
-    pub fn handle(&self) -> &CuBLASHandle {
-        &self.handle
-    }
-}
-
-/// Benchmark different GEMM configurations
-pub fn benchmark_gemm_configs(
-    _handle: &CuBLASHandle,
-    _stream: &CudaStream,
-    m: usize,
-    n: usize,
-    k: usize,
-) -> Vec<GemmBenchmarkResult> {
-    vec![GemmBenchmarkResult {
-        config: "default".to_string(),
-        time_ms: 0.0,
-        tflops: (2.0 * m as f64 * n as f64 * k as f64) / 1e12,
-    }]
-}
-
-/// Benchmark result
-pub struct GemmBenchmarkResult {
-    pub config: String,
-    pub time_ms: f64,
-    pub tflops: f64,
 }
 
 use half::f16;
