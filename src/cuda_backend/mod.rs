@@ -9,11 +9,9 @@ use cudarc::driver::CudaDevice;
 
 pub mod memory;
 pub mod streams;
-pub mod launcher;
 pub mod errors;
 
-pub use memory::{CudaMemoryPool};
-pub use launcher::KernelLauncher;
+pub use memory::CudaMemoryPool;
 pub use errors::{CudaError, CudaResult};
 
 /// CUDA backend for tensor operations

@@ -2,61 +2,10 @@ pub mod cuda_backend;
 
 pub use cuda_backend::{
     CudaBackend,
-    CudaBackendManager,
-    get_cuda_device_count,
     is_cuda_available,
-    get_compute_capability,
-    DeviceProps,
+    compute_capability,
+    device_count,
 };
-
-pub mod gpu {
-    pub use super::cuda_backend::memory::{
-        GpuMemoryPool,
-        DeviceBufferManager,
-        PinnedMemory,
-        BandwidthMonitor,
-        MemoryStats,
-    };
-    
-    pub use super::cuda_backend::streams::{
-        StreamManager,
-        GpuEvent,
-        AsyncHandle,
-        ConcurrentExecutor,
-        StreamPool,
-        StreamPriority,
-    };
-    
-    pub use super::cuda_backend::launcher::{
-        KernelLauncher,
-        PtxModuleCache,
-        PtxCompiler,
-        KernelBuilder,
-        LaunchConfigBuilder,
-        OccupancyCalculator,
-        KernelSource,
-    };
-    
-    pub use super::cuda_backend::cublas::{
-        CuBLASHandle,
-        CuBLASLtHandle,
-        CublasWrapper,
-        MatmulDesc,
-        CublasDataType,
-        GemmBenchmarkResult,
-        benchmark_gemm_configs,
-    };
-    
-    pub use super::cuda_backend::errors::{
-        CudaError,
-        CudaResult,
-        check_cuda,
-        RecoveryStrategy,
-        ErrorLogger,
-        DeviceErrorTracker,
-        DeviceErrorInfo,
-    };
-}
 
 #[cfg(feature = "cuda")]
 pub use cuda_backend::*;
@@ -69,7 +18,7 @@ impl GpuFeatureDetector {
     pub fn detect() -> GpuFeatures {
         let cuda_available = is_cuda_available();
         let device_count = if cuda_available {
-            get_cuda_device_count()
+            device_count()
         } else {
             0
         };
@@ -78,7 +27,7 @@ impl GpuFeatureDetector {
         let mut max_compute_capability = (0, 0);
         
         for i in 0..device_count {
-            if let Some(cc) = get_compute_capability(i) {
+            if let Some(cc) = compute_capability(i) {
                 tensor_cores = tensor_cores || cc.0 >= 7;
                 if cc.0 > max_compute_capability.0 ||
                    (cc.0 == max_compute_capability.0 && cc.1 > max_compute_capability.1) {
