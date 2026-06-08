@@ -1,8 +1,8 @@
 [package]
 name = "mistralrs-oxide"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.88"
+edition = "2021"
+rust-version = "1.70"
 description = "CUDA-Oxide backend for mistral.rs - replacing Candle"
 license = "MIT"
 
@@ -16,19 +16,13 @@ serde_json = "1.0"
 safetensors = "0.7"
 memmap2 = "0.9"
 
-# Real CUDA support via cudarc (actively maintained)
-cudarc = { version = "0.12", features = ["cuda-12050", "driver", "cublas", "cublaslt"], optional = true }
-
-# Additional CUDA ecosystem
-cust = { version = "0.3", optional = true }
-cuda-config = { version = "0.1", optional = true }
+# CUDA support via cudarc (latest stable)
+cudarc = { version = "0.12", optional = true, features = ["cuda-12050", "driver"] }
 
 [features]
 default = []
 cuda = ["cudarc"]
 gpu = ["cuda"]
-cublas = ["cuda"]
-async-ops = ["cuda"]
 
 [dev-dependencies]
 tokio = { version = "1.49", features = ["full"] }
@@ -36,11 +30,3 @@ tokio = { version = "1.49", features = ["full"] }
 [profile.release]
 opt-level = 3
 lto = "thin"
-
-[[bin]]
-name = "infer"
-path = "examples/basic_inference.rs"
-
-[[bin]]
-name = "benchmark"
-path = "examples/benchmark.rs"
