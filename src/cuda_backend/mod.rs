@@ -29,7 +29,7 @@ impl CudaBackend {
             ))?;
         
         Ok(Self {
-            device: Arc::new(device),
+            device,
             device_id,
         })
     }

@@ -6,7 +6,7 @@ use std::fmt;
 use std::error::Error;
 
 /// CUDA error types based on CUDA driver API
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CudaError {
     Success = 0,
     MissingConfiguration = 1,
