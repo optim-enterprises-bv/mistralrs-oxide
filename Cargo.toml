@@ -17,7 +17,7 @@ safetensors = "0.7"
 memmap2 = "0.9"
 
 # CUDA support via cudarc (latest stable)
-cudarc = { version = "0.12", optional = true, features = ["cuda-12050", "driver"] }
+cudarc = { version = "0.12", optional = true, features = ["cuda-12050", "driver", "nvrtc"] }
 
 [features]
 default = []
